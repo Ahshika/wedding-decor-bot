@@ -1,0 +1,28 @@
+{
+  "name": "wedding-decor-bot",
+  "version": "1.0.0",
+  "description": "Express.js Webhook integration between Meta Messenger / WhatsApp API and Google Gemini API for Egyptian Wedding & Event Decoration Brand",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [
+    "express",
+    "gemini",
+    "meta",
+    "messenger",
+    "whatsapp",
+    "webhook",
+    "chatbot"
+  ],
+  "author": "Antigravity Node.js Expert",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^0.1.1",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
