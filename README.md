@@ -1,3 +1,24 @@
+<div align="center">
+
+# Wedding & Event Decor AI Bot
+
+**An AI sales assistant for Facebook Messenger and WhatsApp that speaks Egyptian Arabic**
+
+![Node.js](https://img.shields.io/badge/Node.js-Express-339933?logo=nodedotjs&logoColor=white)
+![Gemini](https://img.shields.io/badge/AI-Gemini%202.5%20Flash-4285F4?logo=googlegemini&logoColor=white)
+![Meta](https://img.shields.io/badge/Messenger%20%2B%20WhatsApp-Graph%20API-0866FF?logo=meta&logoColor=white)
+![Render](https://img.shields.io/badge/deploy-Render-46E3B7?logo=render&logoColor=black)
+
+<img src="docs/images/overview.png" width="860" alt="Example conversation and message flow">
+
+<sub>Illustration: the conversation is an example written for this image, based on the bot's real system prompt.</sub>
+
+</div>
+
+A webhook server that connects a decor brand's Facebook page and WhatsApp number to Google Gemini. Customers get instant replies in friendly Egyptian Arabic, and the bot collects the **event type, venue and date**, one question at a time, so the design team can price the right package.
+
+---
+
 # 🌸 بوت ديكورات المناسبات بالذكاء الاصطناعي (Wedding & Event Decor AI Bot)
 
 مشروع متكامل لسيرفر **Express.js (Node.js)** يعمل كـ **Webhook** للربط المباشر بين منصات التواصل الاجتماعي (**Facebook Messenger** و **WhatsApp Cloud API**) مع **Google Gemini API** مجاناً.
