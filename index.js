@@ -1,139 +1,173 @@
+// لازم يكون أول import عشان المتغيرات تتحمل قبل باقي الملفات
+import 'dotenv/config';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
-import axios from 'axios';
-import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
-
-// Load environment variables from .env file
-dotenv.config();
-
-const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+import { getGeminiResponse } from './src/gemini.js';
+import {
+  BOT_MESSAGE_TAG, DASHBOARD_MESSAGE_TAG,
+  sendFacebookCards, sendFacebookMessage, sendFacebookTyping,
+  sendWhatsAppCards, sendWhatsAppMessage, sendWhatsAppTyping
+} from './src/meta.js';
+import {
+  appendMessage, buildUserKey, geminiHistory, getSession, isDuplicate, runInUserQueue, saveSession
+} from './src/memory.js';
+import { mergeLead, processHandoff, processLead } from './src/leads.js';
+import { ATTACHMENT_LABELS, describeIncoming, parseMessengerEvent, parseWhatsAppMessage } from './src/incoming.js';
+import { getCatalogCards } from './src/catalog.js';
+import {
+  allAppSecrets, findBusinessForMessenger, findBusinessForWhatsApp, loadBusinesses, messengerToken, whatsappToken
+} from './src/businesses.js';
+import { adminRouter } from './src/admin.js';
+import { dashboardRouter } from './src/dashboard/router.js';
 
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// لو موظف رد على العميل بنفسه من صندوق رسايل الصفحة، البوت يسكت مع العميل ده
+const PAUSE_ON_HUMAN_REPLY = process.env.PAUSE_ON_HUMAN_REPLY !== 'false';
 
-// Initialize Google Gemini Client
-const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
+await loadBusinesses();
 
-/**
- * System Prompt المخصص لبراند ديكورات كوش ومناسبات في مصر
- * يتحدث بالعامية المصرية الودودة والاحترافية، ويستفسر عن التفاصيل الأساسية للمناسبة.
- */
-const SYSTEM_PROMPT = `
-أنت مساعد ذكي ومحترف لمصمم ديكورات كوش ومناسبات في مصر (براند: "Joy Decor & Events").
-هدفك الرئيسي هو استقبال العملاء بأسلوب مبهج، راقي، ومحترف بالعامية المصرية السلسة والودودة، ومساعدتهم في تحديد تفاصيل ديكور المناسبة الخاصة بهم.
+const app = express();
+// Render وأي استضافة شبهها بتحط السيرفر ورا proxy (عشان req.ip و req.secure يبقوا صح)
+app.set('trust proxy', 1);
 
-المبادئ والشخصية:
-1. التحدث دائماً بالعامية المصرية الودودة والمحترمة (مثل: "أهلاً بحضرتك يا فندم"، "ألف مبروك مقدماً"، "ربنا يتمملكم على خير"، "منورنا يا فندم").
-2. الردود يجب أن تكون مختصرة، مبهجة، ومناسبة لرسائل المحادثات المباشرة (شات الفيس بوك والواتساب). تجنب النصوص الطويلة المعقدة.
-3. هدفك في المحادثة هو الحصول على التفاصيل التالية بلباقة وبدون إلحاح:
-   - نوع المناسبة (كوشة خطوبة، قراية فاتحة، كتب كتاب، حنة، زفاف/فرح، الخ).
-   - مكان المناسبة (في البيت، الروف، قاعة، حديقة/أوت دور) والمنطقة/المحافظة في مصر (مثلاً: التجمع، المعادي، مدينة نصر، الشيخ زايد، الجيزة... الخ).
-   - تاريخ المناسبة (لتأكيد التفرغ والتحضير المناسب).
-4. لا تطلب كل البيانات مرة واحدة في رسالة ضخمة! اسأل عن نقطة أو نقطتين في كل رد حتى تظل المحادثة طبيعية وسلسة.
-5. إذا سأل العميل عن الأسعار أو الكاتالوج، وضح له بلباقة أن أسعار الكوش والتصميمات بتعتمد على المكان وتفاصيل الورد والإضاءة والمساحة المطلوب تغطيتها، وطلب منه التفاصيل (نوع المناسبة، المكان، والتاريخ) حتى يحدد له فريق التصميم أفضل باكدج وسعر مناسب له تماماً.
-6. اظهر الاهتمام بفرحة العميل دائماً وعبر عن الحماس لمساعدته في جعل يومه مميزاً.
-`;
-
-/**
- * دالة استدعاء Google Gemini API للحصول على الرد المناسب
- * @param {string} userMessage - نص رسالة العميل
- * @returns {Promise<string>} - رد الذكاء الاصطناعي
- */
-async function getGeminiResponse(userMessage) {
-  if (!ai) {
-    console.error('❌ GEMINI_API_KEY is not defined in environment variables.');
-    return 'أهلاً بك يا فندم! معلش فيه مشكلة تقنية بسيطة في النظام، وهيرد عليك أحد ممثلي خدمة العملاء في أقرب وقت.';
+// بنحتفظ بالـ body الخام عشان نتحقق من توقيع Meta
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
   }
+}));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: userMessage }]
-        }
-      ],
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.7,
-      }
-    });
-
-    const replyText = response.text?.trim();
-    return replyText || 'أهلاً بك يا فندم! نورتنا، كيف يمكنني مساعدتك في ديكور المناسبة؟';
-  } catch (error) {
-    console.error('❌ Error calling Google Gemini API:', error.message || error);
-    return 'أهلاً بك يا فندم! ألف مبروك المناسبة، يسعدنا جداً مساعدتك! ممكن تشاركنا بنوع المناسبة ومكانها؟';
-  }
+if (!allAppSecrets().length) {
+  console.warn('⚠️ APP_SECRET is not set. Webhook signature verification is DISABLED (fine for local testing only).');
 }
 
 /**
- * دالة إرسال الرسالة إلى العميل عبر Facebook Messenger Graph API
- * @param {string} recipientId - PSID الخاص بالعميل
- * @param {string} textMessage - النص المراد إرساله
+ * التحقق إن الطلب جاي فعلاً من Meta عن طريق توقيع X-Hub-Signature-256
+ * (بنجرب الـ App Secret العام + بتاع كل بيزنس عامل Meta App خاص بيه)
+ * @param {import('express').Request} req
+ * @returns {boolean}
  */
-async function sendFacebookMessage(recipientId, textMessage) {
-  if (!PAGE_ACCESS_TOKEN) {
-    console.error('❌ PAGE_ACCESS_TOKEN is missing. Cannot send message to Facebook Messenger.');
-    return;
-  }
+function isValidMetaSignature(req) {
+  const secrets = allAppSecrets();
+  if (!secrets.length) return true;
 
-  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+  const signature = req.get('x-hub-signature-256');
+  if (!signature || !req.rawBody) return false;
+  const signatureBuf = Buffer.from(signature);
 
-  const payload = {
-    recipient: { id: recipientId },
-    message: { text: textMessage },
-    messaging_type: 'RESPONSE'
-  };
-
-  try {
-    await axios.post(url, payload, {
-      headers: { 'Content-Type': 'application/json' }
-    });
-    console.log(`✅ Message successfully sent to Facebook recipient: ${recipientId}`);
-  } catch (error) {
-    console.error('❌ Error sending message via Meta Graph API:', error.response?.data || error.message);
-  }
+  return secrets.some((secret) => {
+    const expectedBuf = Buffer.from('sha256=' + crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex'));
+    return signatureBuf.length === expectedBuf.length && crypto.timingSafeEqual(signatureBuf, expectedBuf);
+  });
 }
 
 /**
- * دالة إرسال الرسالة عبر WhatsApp Cloud API (في حال استخدام الواتساب)
- * @param {string} phoneNumberId - ID رقم هاتف الواتساب
- * @param {string} toPhoneNumber - رقم هاتف العميل
- * @param {string} textMessage - النص المراد إرساله
+ * @typedef {Object} Platform - دوال الإرسال الخاصة بكل منصة
+ * @property {(reply: string, quickReplies: string[]) => Promise<unknown>} sendReply
+ * @property {(cards: import('./src/catalog.js').CatalogCard[]) => Promise<void>} sendCards
+ * @property {() => Promise<void>} sendTyping - إظهار "جاري الكتابة..."
  */
-async function sendWhatsAppMessage(phoneNumberId, toPhoneNumber, textMessage) {
-  if (!PAGE_ACCESS_TOKEN) {
-    console.error('❌ PAGE_ACCESS_TOKEN is missing. Cannot send WhatsApp message.');
+
+/**
+ * تحميل الصور والفويس. لو حاجة فشلت بنبلغ الموديل بدل ما نوقف الرد
+ * @param {import('./src/incoming.js').IncomingMessage} incoming
+ */
+async function loadAttachments(incoming) {
+  const media = [];
+  const notes = [];
+  for (const attachment of incoming.attachments) {
+    try {
+      media.push(await attachment.load());
+    } catch (error) {
+      console.error(`❌ Could not download ${attachment.kind}:`, error.response?.data?.error?.message || error.message);
+      notes.push(`[Customer sent a ${ATTACHMENT_LABELS[attachment.kind]} but we could not open it. Apologize kindly and ask them to resend it or type what they need]`);
+    }
+  }
+  return { media, notes };
+}
+
+/** نص رسالة العميل اللي بيتحفظ في السجل (وصف الصورة / تفريغ الفويس بدل الملف نفسه) */
+function historyText(incoming, notes, mediaCount, mediaSummary) {
+  const mediaLabel = incoming.attachments.length
+    ? `[${incoming.attachments.map((a) => ATTACHMENT_LABELS[a.kind]).join(', ')}${mediaCount && mediaSummary ? `: ${mediaSummary}` : ''}]`
+    : '';
+  return [...notes, mediaLabel, incoming.text].filter(Boolean).join(' ');
+}
+
+/**
+ * معالجة رسالة واحدة من أي منصة: جلب الجلسة، توليد الرد، إرساله، وتحديث بيانات الطلب
+ * @param {import('./src/businesses.js').Business} business
+ * @param {import('./src/memory.js').Customer} customer - بيانات العميل والمنصة
+ * @param {import('./src/incoming.js').IncomingMessage} incoming - رسالة العميل
+ * @param {Platform} platform
+ */
+async function handleIncoming(business, customer, incoming, platform) {
+  const session = await getSession(customer);
+
+  // موظف ماسك المحادثة: البوت مايردش، بس بنسجل الرسالة عشان تظهر في لوحة التحكم
+  if (session.pausedUntil && Date.now() < session.pausedUntil) {
+    console.log(`⏸️ Bot is paused for [${customer.userKey}] (a human is handling it). Skipping reply.`);
+    appendMessage(session, 'user', historyText(incoming, incoming.notes, 0, null));
+    await saveSession(session);
     return;
   }
+  session.pausedUntil = null;
 
-  const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+  await platform.sendTyping();
 
-  const payload = {
-    messaging_product: 'whatsapp',
-    recipient_type: 'individual',
-    to: toPhoneNumber,
-    type: 'text',
-    text: { body: textMessage }
-  };
-
-  try {
-    await axios.post(url, payload, {
-      headers: {
-        'Authorization': `Bearer ${PAGE_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-    console.log(`✅ Message successfully sent to WhatsApp recipient: ${toPhoneNumber}`);
-  } catch (error) {
-    console.error('❌ Error sending message via WhatsApp Cloud API:', error.response?.data || error.message);
+  // في الواتساب رقم العميل معروف من الأول
+  if (customer.channel === 'whatsapp' && !session.lead.phone) {
+    session.lead.phone = `+${customer.userId}`;
   }
+
+  const { media, notes: loadNotes } = await loadAttachments(incoming);
+  const notes = [...incoming.notes, ...loadNotes];
+
+  const result = await getGeminiResponse(business, geminiHistory(session), { text: incoming.text, notes, media }, customer.channel);
+
+  // الصور الأول، وبعدين الرد (عشان الأزرار تفضل ظاهرة تحت آخر رسالة)
+  if (result.showCatalog) {
+    await platform.sendCards(getCatalogCards(business, result.showCatalog));
+  }
+  await platform.sendReply(result.reply, result.quickReplies);
+
+  const userText = historyText(incoming, notes, media.length, result.mediaSummary);
+  appendMessage(session, 'user', userText);
+
+  // الرد الاحتياطي (وقت الأخطاء) مش بيتحفظ عشان ميلخبطش سياق المحادثة
+  if (result.ok) {
+    appendMessage(session, 'model', result.reply, 'bot');
+    session.lead = mergeLead(session.lead, result.lead);
+
+    if (result.wantsHuman) {
+      console.log(`🙋 Customer [${customer.userKey}] asked for a human. Pausing bot for ${business.handoffPauseHours}h.`);
+      await processHandoff(business, session, userText);
+    } else {
+      await processLead(business, session, userText);
+    }
+  }
+
+  await saveSession(session);
+}
+
+/**
+ * موظف رد على العميل بنفسه من صندوق رسايل الصفحة: نسجل رده ونوقف البوت مع العميل ده لفترة
+ * @param {import('./src/businesses.js').Business} business
+ * @param {import('./src/memory.js').Customer} customer
+ * @param {string} text
+ */
+async function recordHumanReply(business, customer, text) {
+  const session = await getSession(customer);
+  appendMessage(session, 'model', text, 'human');
+  if (PAUSE_ON_HUMAN_REPLY) {
+    session.pausedUntil = Date.now() + business.handoffPauseHours * 60 * 60 * 1000;
+    console.log(`⏸️ A human replied to [${customer.userKey}] from the Page inbox. Bot paused for ${business.handoffPauseHours}h.`);
+  }
+  await saveSession(session);
 }
 
 // ==========================================
@@ -160,7 +194,12 @@ app.get('/webhook', (req, res) => {
 // ==========================================
 // 2. Webhook Event Handler Endpoint (POST)
 // ==========================================
-app.post('/webhook', async (req, res) => {
+app.post('/webhook', (req, res) => {
+  if (!isValidMetaSignature(req)) {
+    console.warn('⚠️ Rejected webhook request with invalid signature.');
+    return res.sendStatus(401);
+  }
+
   const body = req.body;
 
   // رد سريع بحالة 200 OK لمنع إعادة إرسال المحاولة من Meta
@@ -172,21 +211,41 @@ app.post('/webhook', async (req, res) => {
     // ----------------------------------------------------
     if (body.object === 'page') {
       for (const entry of body.entry || []) {
-        const webhookEvent = entry.messaging?.[0];
-        if (!webhookEvent) continue;
+        const business = findBusinessForMessenger(entry.id);
+        if (!business || !business.active) {
+          console.warn(`⚠️ No active business for Facebook Page [${entry.id}]. Ignoring.`);
+          continue;
+        }
+        const token = messengerToken(business);
 
-        const senderId = webhookEvent.sender?.id;
-        const messageText = webhookEvent.message?.text;
+        for (const webhookEvent of entry.messaging || []) {
+          const senderId = webhookEvent.sender?.id;
+          const message = webhookEvent.message;
 
-        // الاستجابة فقط للرسائل النصية التي تحتوي على محتوى ومن غير أخطاء
-        if (senderId && messageText && !webhookEvent.message?.is_echo) {
-          console.log(`📩 Received Facebook message from [${senderId}]: "${messageText}"`);
+          // echo = رسالة اتبعتت من الصفحة نفسها. لو مش من البوت ولا من لوحة التحكم يبقى موظف رد بإيده
+          if (message?.is_echo) {
+            const customerId = webhookEvent.recipient?.id;
+            if (isDuplicate(message.mid)) continue;
+            if (customerId && ![BOT_MESSAGE_TAG, DASHBOARD_MESSAGE_TAG].includes(message.metadata)) {
+              const customer = { userKey: buildUserKey(business.id, 'messenger', customerId), businessId: business.id, channel: 'messenger', userId: customerId };
+              runInUserQueue(customer.userKey, () => recordHumanReply(business, customer, message.text || '[📎]'));
+            }
+            continue;
+          }
 
-          // توليد الرد باستخدام Gemini API
-          const aiReply = await getGeminiResponse(messageText);
+          const incoming = parseMessengerEvent(webhookEvent, business);
+          if (!senderId || !incoming || isDuplicate(incoming.id)) continue;
 
-          // إرسال الرد المباشر للعميل
-          await sendFacebookMessage(senderId, aiReply);
+          console.log(`📩 [${business.id}] Facebook message from [${senderId}]: ${describeIncoming(incoming)}`);
+
+          const customer = { userKey: buildUserKey(business.id, 'messenger', senderId), businessId: business.id, channel: 'messenger', userId: senderId };
+          runInUserQueue(customer.userKey, () =>
+            handleIncoming(business, customer, incoming, {
+              sendReply: (reply, quickReplies) => sendFacebookMessage(token, senderId, reply, quickReplies),
+              sendCards: (cards) => sendFacebookCards(token, senderId, cards),
+              sendTyping: () => sendFacebookTyping(token, senderId)
+            })
+          );
         }
       }
     }
@@ -196,22 +255,39 @@ app.post('/webhook', async (req, res) => {
     // ----------------------------------------------------
     else if (body.object === 'whatsapp_business_account') {
       for (const entry of body.entry || []) {
-        const changes = entry.changes?.[0]?.value;
-        const message = changes?.messages?.[0];
+        for (const change of entry.changes || []) {
+          const value = change.value;
+          const phoneNumberId = value?.metadata?.phone_number_id;
+          if (!phoneNumberId || !value.messages?.length) continue;
 
-        if (message && message.type === 'text') {
-          const fromNumber = message.from;
-          const messageText = message.text?.body;
-          const phoneNumberId = changes.metadata?.phone_number_id;
+          const business = findBusinessForWhatsApp(phoneNumberId);
+          if (!business || !business.active) {
+            console.warn(`⚠️ No active business for WhatsApp number [${phoneNumberId}]. Ignoring.`);
+            continue;
+          }
+          const token = whatsappToken(business);
 
-          if (fromNumber && messageText && phoneNumberId) {
-            console.log(`📩 Received WhatsApp message from [${fromNumber}]: "${messageText}"`);
+          for (const message of value.messages) {
+            const fromNumber = message.from;
+            const incoming = parseWhatsAppMessage(message, token);
+            if (!fromNumber || !incoming || isDuplicate(incoming.id)) continue;
 
-            // توليد الرد باستخدام Gemini API
-            const aiReply = await getGeminiResponse(messageText);
+            console.log(`📩 [${business.id}] WhatsApp message from [${fromNumber}]: ${describeIncoming(incoming)}`);
 
-            // إرسال الرد عبر WhatsApp
-            await sendWhatsAppMessage(phoneNumberId, fromNumber, aiReply);
+            const customer = {
+              userKey: buildUserKey(business.id, 'whatsapp', fromNumber),
+              businessId: business.id,
+              channel: 'whatsapp',
+              userId: fromNumber,
+              phoneNumberId
+            };
+            runInUserQueue(customer.userKey, () =>
+              handleIncoming(business, customer, incoming, {
+                sendReply: (reply, quickReplies) => sendWhatsAppMessage(token, phoneNumberId, fromNumber, reply, quickReplies),
+                sendCards: (cards) => sendWhatsAppCards(token, phoneNumberId, fromNumber, cards),
+                sendTyping: () => sendWhatsAppTyping(token, phoneNumberId, message.id)
+              })
+            );
           }
         }
       }
@@ -221,13 +297,23 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// صور الكتالوج اللي في public/catalog
+app.use('/catalog', express.static(fileURLToPath(new URL('./public/catalog', import.meta.url))));
+
+// لينكات التحكم اللي بتوصل لصاحب البيزنس في الإشعار (رجّع البوت يرد)
+app.use('/admin', adminRouter);
+
+// لوحة التحكم
+app.use('/dashboard', dashboardRouter);
+
 // الصفحة الرئيسية لتأكيد عمل السيرفر
 app.get('/', (req, res) => {
-  res.send('🌸 Wedding Decor & Event AI Webhook Server is active and running!');
+  res.send('🌸 Wedding Decor & Event AI Webhook Server is active and running! <a href="/dashboard">Dashboard</a>');
 });
 
 // Start Express Server
 app.listen(PORT, () => {
   console.log(`🚀 Webhook Server is running on port ${PORT}`);
   console.log(`🔗 Local Webhook Verification URL: http://localhost:${PORT}/webhook`);
+  console.log(`🖥️ Dashboard: http://localhost:${PORT}/dashboard`);
 });
